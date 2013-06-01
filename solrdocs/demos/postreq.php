@@ -44,8 +44,64 @@ class PostRequest {
 // Post a series of files directly
 class PostFilesRequest extends PostRequest {
 
+    var $batchSize = 1000;
+    var $count;
+    var $mh;
+    var $currBatch;
+
     function __construct($urlEndpoint) {
         parent::__construct($urlEndpoint);
+        $this->count = 0;
+        $this->mh = null;
+        $this->resetMultiHandle();
+        $this->currBatch = array();
+    }
+
+    function resetMultiHandle() {
+        if ($this->mh) {
+            curl_multi_close($this->mh);
+        }
+        $this->mh = curl_multi_init(); 
+        $this->currBatch = array();
+    }
+
+    function runBatch() {
+        $active = False;
+        do {
+            $mrc = curl_multi_exec($this->mh, $active);
+        } while ($mrc == CURLM_CALL_MULTI_PERFORM);
+
+
+        while ($active && $mrc == CURLM_OK) {
+
+            if (curl_multi_select($this->mh, $active)) {
+                do {
+                    $mrc = curl_multi_exec($this->mh, $active);
+                } while ($mrc == CURLM_CALL_MULTI_PERFORM);
+            }
+        }
+    }
+
+    function finishBatch() {
+        $contents = array();
+        foreach ($this->currBatch as $ch) {
+            $contents[] = curl_multi_getcontent($ch);
+            curl_close($ch);
+        }
+        return $contents;
+    }
+
+    function batchOrExec($ch) {
+        $this->count++;
+        $this->currBatch[] = $ch;
+        curl_multi_add_handle($this->mh, $ch);
+        if (($this->count % $this->batchSize) == 0) {
+            $this->runBatch();
+            $allArr = $this->finishBatch();
+            $this->resetMultiHandle();
+            return $allArr;
+        }
+        return FALSE;
     }
     
 
@@ -56,14 +112,20 @@ class PostFilesRequest extends PostRequest {
         $numFiles = 0;
         $url = $this->fullUrl($queryParams);
         $contentType = array($contentType);
-        curl_setopt($this->ch, CURLOPT_URL, $url);
-        curl_setopt($this->ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($this->ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($this->ch, CURLOPT_POST, true);
-        curl_setopt($this->ch, CURLOPT_HTTPHEADER, $contentType); 
         foreach (glob($globPattern, GLOB_NOSORT) as $filename) {
-            curl_setopt($this->ch, CURLOPT_POSTFIELDS, file_get_contents($filename));
-            $response = $this->handleResponse(curl_exec($this->ch));
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $contentType); 
+            curl_setopt($ch, CURLOPT_POSTFIELDS, file_get_contents($filename));
+            $results = $this->batchOrExec($ch);
+            if ($results) {
+                foreach ($results AS $result) {
+                    $response = $this->handleResponse($result);
+                }
+            }
             echo "Posted $numFiles -- $filename           \r";
             ++$numFiles;
         }
